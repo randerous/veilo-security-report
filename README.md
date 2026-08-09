@@ -24,3 +24,7 @@ Still requested from the Veilo team (bounds any deep-dive):
 1. Circuit source + r1cs/zkey + trusted-setup transcript
 2. Reproducible build flow + ELF comparison
 3. Relayer key management & bonding policy
+
+
+## v3 update (2026-08-10)
+Two additional code-confirmed findings were added: **Finding 4 (Critical)** — uncapped executor lamport sweep routes settled native-SOL perp proceeds to the relayer (`perps.rs` 74-90, five call sites); **Finding 5 (Medium-High)** — swap legs not bound to the ZK proof, whitelisted relayer can redirect pool surplus. See [findings-addendum-20260810.md](findings-addendum-20260810.md). Superteam submission updated.
