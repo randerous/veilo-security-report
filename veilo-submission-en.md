@@ -1,127 +1,111 @@
-# Veilo Privacy Pool — Superteam Earn Submission Draft (EN)
+# Veilo privacy_pool — Security Review (Superteam Earn submission, v2)
 
-- Bounty: veilo-bounty ($2,000 USDC, deadline 2026-08-20T22:59:59Z)
-- Program: github.com/VeiloSolana/privacy-program — Anchor/Solana `privacy_pool`
+- Target: `github.com/VeiloSolana/privacy-program` (Anchor/Solana `privacy_pool`)
 - Mainnet Program ID: `GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU`
-- Audit basis: read-only mainnet analysis + source review (lib.rs 5388 lines: swap/phoenix/perps/positions/predictions/merkle_tree/zk/groth16/vk_constants)
-- Full technical report (Chinese): `/home/r/business/ops/veilo-audit.md` (submit alongside / attach)
-- Compliance: read-only only; no live funds moved; no on-chain writes performed.
+- Date: 2026-08-09 (v2 re-verification; v1 submitted 2026-08-09, revised same day after deeper source + on-chain re-check)
+- Method: source review + read-only mainnet verification. **No live funds were moved; no on-chain writes.**
 
-## Executive summary
+## Summary
 
-No unconditional, logic-only exploit that directly drains funds was found in the
-on-chain verifiable portion. Three findings are reported:
+Two confirmed findings and one retracted claim:
 
-1. **H1 (High, circuit-conditional):** `merge_positions` decouples the PDA balance
-   from the value of the notes burned by the proof → the shared per-mint vault
-   withdrawal cap can be inflated.
-2. **H2 (Low, unconditional):** `ext_data.refund` semantics are broken: withdrawals
-   pay `fee + refund` to the relayer; swap/open paths ignore `refund` entirely.
-3. **H3 (Medium, design/custody):** deposits must be pre-funded to whitelisted
-   relayers, contradicting the stated threat model ("relayers do not custody user funds").
+1. **H2 (Low, unconditional) — `ext_data.refund` is paid to the relayer, not the user.**
+   Verified in `handle_public_amount` (lib.rs): on withdrawal, the SPL branch transfers
+   `fee + refund` to the relayer ATA and `withdrawal − fee − refund` to the recipient;
+   the native branch credits `fee + refund` to the relayer lamports. `ExtData.refund` is
+   documented as "Refund to the user", and `ExtData::hash()` binds it into the proof, so a
+   user who sets `refund > 0` silently loses that amount. `transact_swap` and the position
+   open/close paths never read `refund` at all. No attacker required — user-signed silent
+   loss / documentation mismatch. Suggested fix: pay `refund` to `recipient` (or the user's
+   ATA) on withdrawal, or force `refund == 0` outside withdrawal.
 
-## H1 — merge_positions: PDA balance detached from proven note value
+2. **H3 (Medium, design contradiction) — deposits are custodied by whitelisted relayers.**
+   `AUDIT.md` states relayers are "trusted for submission and liveness, not for custody".
+   In practice `transact` deposit requires the user to pre-fund a relayer-owned account:
+   SPL branch requires `user_token.owner == relayer` and transfers with relayer authority;
+   native branch does `system_program::transfer(from: relayer, to: vault)`. A malicious or
+   compromised whitelisted relayer (4 on the USDC pool) can keep a pre-funded deposit and
+   the chain cannot distinguish it from a legitimate deposit. Suggested fix: user-signed
+   deposit instruction (user → vault, authority = user), or explicit custody disclosure +
+   relayer bonds/limits.
 
-- **Invariant violated:** `PositionPDA.balance == value of the position notes it tracks`;
-  the shared per-mint vault may only be drawn against the real value of burned notes.
-- **Affected path:** `positions.rs` — `open_position` / `close_position` /
-  `close_position_to_sol` / `merge_positions` → shared per-mint `position_vault_record`.
-- **Facts:**
-  - `merge_positions` only requires: both input PDAs active, same mint/tree,
-    same claimant, `merged_amount == pda_0.balance + pda_1.balance`, and sets
-    `new_pda.balance = merged_amount`.
-  - The Groth16 proof (`verify_transaction_groth16`, public_amount=0) only binds
-    root/nullifier/commitment as public inputs. **On-chain there is no check that
-    the value of the two burned input notes equals the sum of the PDA balances.**
-    The proof may burn any two notes (e.g. dust change notes produced by partial
-    closes that are not tracked by any PDA).
-  - `close_position` guards with `swap_amount <= pos_pda.balance`
-    (commit 8decb20) plus the circuit-implicit `swapAmount <= sumIns`. The team's
-    own commit message admits: "the only thing stopping one position from drawing
-    on another's share of the vault was circuit soundness."
-  - Attack sketch: open two positions of value 100 each (balances 100+100);
-    partial-close a third position to mint two untracked dust notes of value 1;
-    call `merge_positions` with the two balance-100 PDAs and a proof burning the
-    two dust notes, `merged_amount = 200`; then `close_position` the new PDA with
-    `swap_amount = 200`. If the circuit does not enforce `swapAmount <= sumIns`,
-    the shared vault pays 200 while the notes are only worth 2 — other users'
-    positions are diluted.
-- **Severity:** High if the circuit fails to enforce `swapAmount <= sumIns`;
-  even with a sound circuit, the position pool's solvency rests on a single
-  circuit assumption with no on-chain backstop.
-- **Verification status:** conditional — requires circuit artifacts (not in repo:
-  no .circom/.r1cs/.zkey/.wasm). Local anchor test + `simulateTransaction`
-  (read-only, unsigned) with a mismatched proof is the next step once artifacts
-  are provided.
-- **Suggested fix:** (a) expose the merged note value as a public input and have
-  `merge_positions` verify `merged_amount == output note value`; (b) drop
-  dependence on `pos_pda.balance` and use the proven note value as the only cap;
-  (c) at minimum, cap close `swap_amount` by `min(pos_pda.balance, circuit-verifiable cap)`
-  and initialize `new_pda.balance = 0` for recalibration at close.
+3. **Former H1 (retracted as a vulnerability, downgraded to informational).**
+   The v1 report claimed `merge_positions` could inflate the shared per-mint position vault
+   cap by burning untracked dust notes while setting `merged_amount` from arbitrary PDAs.
+   Re-verification shows this is **not exploitable**:
 
-## H2 — refund field is broken (unconditional)
+   - `MergePositions` enforces `has_one = claimant` on **both** input PDAs and requires a
+     co-signing `claimant: Signer` — victim PDAs cannot be merged by anyone else.
+   - `merged_amount` must equal `pda_0.balance + pda_1.balance` — the new PDA balance
+     cannot be inflated above the sum of the two consumed PDAs.
+   - `close_position` / `close_position_to_sol` cap `swap_amount <= pos_pda.balance`
+     (hardened in commit 8decb20), and with a sound circuit any close must burn
+     position-tree notes whose value covers `swap_amount` (`sumIns = change + destAmount`
+     in the swap circuit). The physical per-mint vault token balance is the hard cap.
+   - `AUDIT.md` already discloses the circuit-soundness dependency ("a flawed circuit or an
+     unsound trusted setup therefore breaks pool solvency"), so the conditional claim added
+     no new attack surface beyond the team's own disclosure.
+   - **On-chain (read-only, 2026-08-09):** the position pool currently holds **no** vault
+     records for any checked major mint — USDC, SOL, USDT, PhUSD, WIF, JUP, POPCAT, BONK,
+     JTO, PYTH, WEN, USDS all `getAccountInfo` = null for their `position_vault_v1` PDAs.
+     The position tree (`B5tqSDVy7KEMuYyqXBniUZY7ZGaAbLb1bfJHVe3DbPMZ`) has `next_index = 35`
+     leaves and `position_config` (`FjmEzWofqUPMyFyh9r4n2rw134c8rKfqqUK44mZqA6JE`) shows
+     4 relayers, `num_trees = 1`, `min_swap_fee = 0`, `swap_fee_bps = 0`. I.e. no material
+     funds are exposed on the position surface on mainnet, so even the conditional scenario
+     cannot produce fund loss today.
 
-- **Invariant violated:** `ExtData::hash()` claims to bind recipient/relayer/fee/
-  refund/claimant with refund being the user's change; on-chain, both SPL and
-  native withdrawal branches in `handle_public_amount` transfer `fee + refund` to
-  the **relayer**; `transact_swap` and the open paths **ignore** refund entirely
-  (`vault_amount = swapped − fee`).
-- **PoC:** a user signs a withdrawal proof with `ext_data.refund > 0`; the chain
-  pays `fee + refund` to the relayer account; the user receives no change. No
-  attacker required — silent user loss / doc mismatch.
-- **Severity:** Low (not a third-party exploitable drain; proofs are user-signed).
-- **Suggested fix:** pay refund to recipient on withdrawal, force `refund == 0` on
-  swap/open paths (or delete the field), and fix the docs/SDK.
+   Kept as an informational note: the position pool's accounting (PDA balances vs.
+   `total_balance` vs. physical vault) has no on-chain backstop that binds a PDA balance to
+   the value of the notes it tracks — it rests on circuit soundness plus the vault balance
+   cap. If the team ever activates fees (`swap_fee_bps > 0`), `pos_pda.balance =
+   dest_amount` vs. `total_balance += dest_amount − fee` creates a small positive
+   "air" that can block full closes (liveness), not theft.
 
-## H3 — deposits are custodied by whitelisted relayers (design contradiction)
+## Exclusion analysis (key attack surfaces cleared, read-only verified)
 
-- **Invariant violated:** stated threat model "Relayers are trusted for submission
-  and liveness, not for custody of private notes". In practice `transact` deposit:
-  SPL branch requires `user_token.owner == relayer` and transfers with relayer as
-  authority; native branch `system_program::transfer(from: relayer, to: vault)` —
-  the user must first send tokens/SOL to a relayer-owned account.
-- **PoC:** after a user pre-funds a relayer with 10 USDC for deposit, a malicious or
-  compromised relayer submits a plain transfer (no `transact`) and keeps the funds;
-  the chain cannot distinguish this from a legitimate deposit. 4 whitelisted
-  relayers — any single one failing eats deposits.
-- **Severity:** Medium (requires relayer compromise; threat-model vs implementation
-  contradiction, not a pure program-logic bug).
-- **Suggested fix:** add a user-signed deposit instruction (`user_token.owner == user`,
-  authority = user, direct user→vault), or explicitly disclose the custody trust and
-  add operational controls (relayer bond, per-relayer limits).
+- Double spend: nullifier markers via `init` + `is_spent`; dummy nullifiers burned; all
+  transact/swap/phoenix/perps/prediction/position paths mark inputs spent. OK.
+- Replay: proofs bind root, `ext_data_hash` (recipient/relayer/fee/refund/claimant), mint,
+  nullifiers, commitments, deadline; nullifiers are one-time. OK.
+- PDA seeds / non-canonical field elements: `require_canonical` on root/nullifier/commitment
+  (AUDIT-001, verified in on-chain ELF). OK.
+- Merkle bounds: `next_index < 2^height`, capacity checks, root must be in 256-entry
+  history. Liveness-only caveat (stale proofs need refresh). OK.
+- CPI safety: swap program whitelist (Jupiter + OpenBook + Phoenix/EMBER/Perps IDs),
+  account/position checks, `dex_amount_in == swap_amount`, `vault_amount >= dest_amount`,
+  `SwapLeftoverTokens`. OK.
+- Fees/rounding: u128 checked math; fee caps at init/update; `fee + refund <=
+  withdrawal_amount`; `min_valid_withdrawal` anti-bypass. OK.
+- Auth: withdraw/exit require claimant co-sign; merge requires `has_one = claimant` on both
+  input PDAs. OK.
+- Vault reconciliation: USDC vault ATA == TVL (314,948,948 units) exactly; SOL vault holds
+  ≈0.42 SOL surplus locked in the pool (informational, H5). OK.
 
-## Exclusion analysis (key attack surfaces cleared)
+## On-chain evidence (read-only, mainnet, 2026-08-09)
 
-- Double spend: nullifier markers via `init` + `is_spent`; dummy nullifiers burned; all paths covered. ✅
-- Replay: proof binds root/ext_data_hash/mint/nullifier/commitment/deadline; nullifiers one-time. ✅
-- PDA seeds / non-canonical field elements: `require_canonical` on root/nullifier/commitment (AUDIT-001, verified in on-chain ELF). ✅
-- Merkle bounds: `next_index < 2^height`, `remaining_capacity`, root in 256-entry history. ⚠️ liveness-only.
-- CPI safety: whitelisted swap programs + account checks + amount bindings + `SwapLeftoverTokens`. ✅
-- Fees/rounding: u128 checked math; fee caps enforced at init/update; `fee+refund <= withdrawal_amount`; `min_valid_withdrawal`. ✅
-- Auth: withdraw/exit paths require claimant sign-off; trading-type instructions rely on trusted relayers (see H3). ✅
-- Vault reconciliation: USDC vault ATA balance == TVL exactly (314,948,948); SOL vault surplus ≈0.42 SOL (benign, locked). ✅
+- ProgramData `T1arFasFzpCgUxCkzWquUwGKwDwrMgygTW8x6PF2bo3`: last_deployed_slot
+  432,860,998; upgrade_authority `cu82g8m9evMKYFyedsrfr789bz5kgKpqyssNwKfjayR`; ELF
+  sha256 `048add2c2d817a044bbbafd2547c7533d8883310f3dcdd8f1fded8fa248f6efb` (matches
+  AUDIT.md).
+- Main pools (USDC/SOL) live with TVL 314,948,948 / 4,924,854,492; trees at
+  next_index 1228 / 4746.
+- Position pool: config `FjmEzWofqUPMyFyh9r4n2rw134c8rKfqqUK44mZqA6JE` (4 relayers, 1
+  tree, fees 0); tree `B5tqSDVy7KEMuYyqXBniUZY7ZGaAbLb1bfJHVe3DbPMZ` next_index 35;
+  `position_vault_v1` records absent for USDC/SOL/USDT/PhUSD/WIF/JUP/POPCAT/BONK/JTO/PYTH/
+  WEN/USDS → position surface carries no material TVL.
 
-## On-chain evidence (read-only, mainnet)
+## What still cannot be verified without the circuit artifacts
 
-- ProgramData `T1arFasFzpCgUxCkzWquUwGKwDwrMgygTW8x6PF2bo3`: last_deployed_slot 432,860,998;
-  upgrade_authority `cu82g8m9evMKYFyedsrfr789bz5kgKpqyssNwKfjayR`; ELF sha256
-  `048add2c2d817a044bbbafd2547c7533d8883310f3dcdd8f1fded8fa248f6efb` (matches AUDIT.md).
-- USDC pool: config `8isRtjjapkizW6QYBtwSEhZXuG4LVDoUVkNBsEhHDhQy` — vault balance == TVL
-  (314,948,948 units); fee_bps=500; 4 whitelisted relayers; tree next_index=1228.
-- SOL pool: config `BoEvEZQo9KWY7ajjbH3BQTrjgAdGfGCd8HYTcZhG8jpp` — vault 5,347,469,772 lamports
-  vs TVL 4,924,854,492 (surplus 422,615,280 ≈ 0.42 SOL); tree next_index=4746.
-- `global_config` `2gRVPz3nGAFxDaTzaGftgVDH3ufcKK1WYCR4H87cq8gk` and `position_config`
-  `FjmEzWofqUPMyFyh9r4n2rw134c8rKfqqUK44mZqA6JE` exist, owner = program.
-
-## Request to the Veilo team (unblocks H1 from conditional → deterministic)
-
-1. Circuit source + r1cs/zkey + trusted-setup transcript.
-2. Reproducible build flow + ELF comparison.
+1. Circuit source, r1cs/zkey, trusted-setup transcript (not in the repo; `zk/` is
+   gitignored; not published on npm/GitHub code search as of 2026-08-09).
+2. Reproducible build flow / ELF diff.
 3. Relayer key management & bonding policy.
 
-## Submission checklist
+These limit any audit to source + on-chain state; they do not change the two confirmed
+findings above, which are unconditional and code-level.
 
-- [ ] Register Superteam Earn account (currently blocked by email whitelist; Privy user + tokens preserved)
-- [ ] Attach `veilo-audit.md` (full technical report) + this summary
-- [ ] Confirm "no live funds moved" statement
-- [ ] Submit before 2026-08-20T22:59:59Z
+## Contact / payment
+
+- Email: shopqwphvuhc@web-library.net
+- Solana (USDC): 6HfLRFR6B2y1jgzVVF6inCzvd7kKSaW55nTiACJDyQJV
+- EVM: 0x677e39F988135F5F10Db6a0Eb329CDC05D7c0946
