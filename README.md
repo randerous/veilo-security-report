@@ -1,11 +1,11 @@
-# Veilo privacy_pool — Security Review Handover
+# Veilo privacy_pool — Security Review (Superteam Earn Submission)
 
 This repository contains a security review of the Veilo `privacy_pool` mainnet program
 (Anchor/Solana, Program ID `GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU`),
-prepared for the Superteam Earn bounty `veilo-bounty` ($2,000 USDC, deadline 2026-08-20).
+submitted for the Superteam Earn bounty `veilo-bounty` ($2,000 USDC, deadline 2026-08-20).
 
-Access is restricted to the Veilo maintainers. Files:
-- `veilo-submission-en.md` — English submission draft (executive summary + H1/H2/H3 + exclusions + on-chain evidence)
+Files:
+- `veilo-submission-en.md` — English submission (executive summary + H1/H2/H3 + exclusions + on-chain evidence)
 - `veilo-audit.md` — full Chinese technical report
 
 Contact / payment:
