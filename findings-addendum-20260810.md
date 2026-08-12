@@ -6,7 +6,7 @@
 > / USDC-EVM `0x677e39F988135F5F10Db6a0Eb329CDC05D7c0946` | contact: shopqwphvuhc@web-library.net
 
 ---
-## Finding 4 (Critical, code-confirmed) — uncapped executor lamport sweep routes settled native-SOL perp proceeds to the relayer
+## Finding 4 (Medium, race-dependent) — uncapped executor lamport sweep can route settled native-SOL perp proceeds to the relayer
 
 **Location:** `programs/privacy-pool/src/perps.rs` — `sweep_jperp_executor_lamports` (74-90), called from 5 instruction handlers without any cap: `jperp_open_position` (585), `jperp_set_tpsl` (742), `jperp_close_position` (920), `jperp_cancel_trigger` (1036), `jperp_reissue_notes` (1285). Source HEAD `cb1022d`.
 
