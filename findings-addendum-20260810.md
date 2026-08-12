@@ -1,4 +1,4 @@
-# Veilo privacy_pool — Addendum 2026-08-10 (v3): Critical + Medium-High findings
+# Veilo privacy_pool — Addendum 2026-08-10/12 (v3): Medium + Medium-High findings
 
 > Independent source verification at HEAD `cb1022d` of github.com/VeiloSolana/privacy-program.
 > Superteam Earn submission `67143715-44a4-4b7f-9ddf-25bbc0e7d412` (veilo-bounty) updated with the
@@ -20,7 +20,9 @@ Two actors:
 
 **Fix:** apply the bounded sweep from `jperp_recover_native` to all 5 call sites (sweep only the `EXECUTOR_JUPITER_RENT_FUNDING`-sized residual; route anything above to the vault/claimant), or close the executor PDA into the vault on settlement and distribute via `jperp_recover_native`/reissue.
 
-**Verification:** verified in source at HEAD `cb1022d` (refs above). The same sweep mechanism executes on mainnet: `jperp_cancel_trigger` on native-SOL positions (2026-06-29 txns `2fphUb22...`/`2tzYK2yf...`; executor lamports swept to relayer `5oV1czyCFdULn6njjBbkB9S779tMmhnWEk1qNgvoLtk`, ~0.0037 SOL rent each); native vault `G7pfSRPttztsKVNtJUNXWXE4DLLzcrqFgPfPuiKuDo1j` ~5.07 SOL (config `BoEvEZQo9KWY7ajjbH3BQTrjgAdGfGCd8HYTcZhG8jpp`, total_tvl 4.647 SOL). A public LiteSVM reproduction (`mohit-1710/veilo-privacy-pool-audit`) shows 2 SOL moved executor->relayer in a single `jperp_cancel_trigger`.
+**Re-assessment (2026-08-12):** after re-reading HEAD `4958a2a`, the market-close paths (`jperp_close_position` / `jperp_close_position_to_sol`) settle proceeds into the executor's WSOL ATA, which `sweep_jperp_executor_lamports` does NOT touch (it only moves `executor.lamports()`). The sweep therefore does not intercept market-close settlement. The path that remains is the **native-close leftover race**: when a trigger is cancelled (`jperp_cancel_trigger`) while its position's settle-return has already unwrapped into executor native lamports, the uncapped sweep at that site takes the proceeds. Because this requires a specific cancel-vs-settlement timing/mis-operation rather than being unconditional, **severity is Medium (race/timing-dependent)**, not Critical. This replaces the earlier "Critical" label.
+
+**Verification:** verified in source at HEAD `cb1022d`/`4958a2a` (refs above). The same sweep mechanism executes on mainnet: `jperp_cancel_trigger` on native-SOL positions (2026-06-29 txns `2fphUb22...`/`2tzYK2yf...`; executor lamports swept to relayer `5oV1czyCFdULn6njjBbkB9S779tMmhnWEk1qNgvoLtk`, ~0.0037 SOL rent each); native vault `G7pfSRPttztsKVNtJUNXWXE4DLLzcrqFgPfPuiKuDo1j` ~5.07 SOL (config `BoEvEZQo9KWY7ajjbH3BQTrjgAdGfGCd8HYTcZhG8jpp`, total_tvl 4.647 SOL). A public LiteSVM reproduction (`mohit-1710/veilo-privacy-pool-audit`) shows 2 SOL moved executor->relayer in a single `jperp_cancel_trigger`.
 
 ## Finding 5 (Medium-High, code-confirmed) — swap legs not bound to the ZK proof; whitelisted relayer can redirect pool swap surplus
 
